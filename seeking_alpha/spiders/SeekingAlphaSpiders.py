@@ -3,7 +3,9 @@ from scrapy.loader import ItemLoader
 from twisted.internet.error import TimeoutError
 from twisted.internet.error import DNSLookupError
 from seeking_alpha.items import SeekingAlphaItem
+from seeking_alpha.items import SeekingAlphaArticle
 from scrapy.spidermiddlewares.httperror import HttpError
+import urllib.request
 
 
 class EarningsSpider(scrapy.Spider):
@@ -50,23 +52,6 @@ class EarningsSpider(scrapy.Spider):
             item.add_css('company_ceo', 'h3.list-group-item-heading > a::attr(href)')
             yield item.load_item()
 
-    # TODO
-    def parse_article(self, response):
-        article_url = response.css('h3.list-group-item-heading > a::attr(href)')
-        article_url = self.source_url + article_url.extract()[0]
-        request = scrapy.Request(article_url ,
-                                 callback=self.parse_article ,
-                                 meta={'item': item})
-
-        item = response.meta['item']
-        date_modified = response.xpath('//*[@id="content-rail"]/article/header/time/@datetime').get()
-        date_published = response.xpath('//*[@id="a-hd"]/div/time/@content').get()
-        audio = response.xpath('//*[@id="content-rail"]/article/section/audio/source/@src').get()
-        item.add_value('date_modified', date_modified)
-        item.add_value('date_published', date_published)
-        item.add_value('audio', audio)
-        yield item.load_item()
-
     def error_response(self, failure):
         if failure.check(HttpError):
             # you can get the response
@@ -87,7 +72,77 @@ class EarningsSpider(scrapy.Spider):
             yield self.logger.error('TimeoutError on %s', request.url)
 
 
-# scrapy crawl earnings -a start=5 -a end=10
+class ArticleSpider(scrapy.Spider):
+
+    name = "earnings_article"
+    rotate_user_agent = True
+    source_url = "https://seekingalpha.com"
+
+    def start_requests( self ):
+        num_pages = getattr(self , 'num_pages' , None)
+        start = getattr(self , 'start' , None)
+        end = getattr(self , 'end' , None)
+        pag = getattr(self , 'pag' , None)
+        articles_url = "/earnings"
+        section_url = "/earnings-call-transcripts"
+        site_url = self.source_url + articles_url + section_url + "/"
+        if num_pages:
+            urls = [site_url + str(i) for i in range(1 , int(num_pages) + 1)]
+        elif start and end:
+            urls = [site_url + str(i) for i in range(int(start) , int(end) + 1)]
+        elif pag:
+            urls = [self.source_url + articles_url + section_url + "/" + pag]
+        else:
+            return print("Need an start request url")
+        for url in urls:
+            yield scrapy.Request(url=url ,
+                                 callback=self.parse ,
+                                 errback=self.error_response ,
+                                 dont_filter=True)
+
+    def parse( self , response ):
+        item = ItemLoader(item=SeekingAlphaArticle() , selector=response)
+        article_url = response.css('article > header > meta::attr(content)')[0].get()
+        article_title = response.css(".sa-art-hd h1::text")[0].get()
+        symbol = response.css("span#about_primary_stocks > a::attr(href)").get()
+        symbol = symbol.split("/")[-1]
+        date_modified = response.css('article > header > time::attr(datetime)')[0].get()
+        date_published = response.css('.sa-art-hd time::attr(content)')[0].get()
+        article_text = " \n ".join(i for i in response.xpath("//*[@id='a-body']/p/text()").extract())
+        article_text_html = " ".join(i for i in response.xpath("//*[@id='a-body']/p").extract())
+        article_audio = response.css('.audio source::attr(src)')[0].get()
+        audio_file = article_audio.split("/")[-1][:-4] + "-" + symbol + ".mp3"
+        urllib.request.urlretrieve(article_audio, "audio/" + audio_file)
+        item.add_value('symbol', symbol)
+        item.add_value('date_modified', date_modified)
+        item.add_value('date_published', date_published)
+        item.add_value('article_audio', article_audio)
+        item.add_value('article_url', article_url)
+        item.add_value('article_title', article_title)
+        item.add_value('article_text', article_text)
+        item.add_value('article_text_html', article_text_html)
+        yield item.load_item()
+
+    def error_response( self , failure ):
+        if failure.check(HttpError):
+            # you can get the response
+            response = failure.value.response
+            with open("errors/http_error.txt" , "a") as f:
+                f.write(response.url + "\n")
+            yield self.logger.error('HttpError on %s' , response.url)
+        elif failure.check(DNSLookupError):
+            # this is the original request
+            request = failure.request
+            with open("errors/dnslookup_error.txt" , "a") as f:
+                f.write(failure.url + "\n")
+            yield self.logger.error('DNSLookupError on %s' , request.url)
+        elif failure.check(TimeoutError):
+            request = failure.request
+            with open("errors/timeout_error.txt" , "a") as f:
+                f.write(failure.url + "\n")
+            yield self.logger.error('TimeoutError on %s' , request.url)
+
+    # scrapy crawl earnings -a start=5 -a end=10
 
     """
     def parse(self, response):
